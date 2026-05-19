@@ -1,0 +1,1959 @@
+{
+  "name": "PrimeEgy — Portal → Odoo Sync v4 (FIXED FINAL)",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://portal.primeegy.com/api/b2b/v1/collections",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2096,
+        3488
+      ],
+      "id": "80718cec-9f5e-4c26-82f6-24fc82fcf259",
+      "name": "HTTP Request2",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "q8paCIqF7vDywgPh",
+          "name": "Header Auth account prim coll"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Post-Contact-Merge Resolver\n//\n//  After Merge2, some items arrive from the TRUE branch (contact_found=true,\n//  partner_id already populated) and some from Create an CONTACT2 (new ID).\n//  This node normalises both paths into a single `resolved_partner_id`.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n\n  // If the item came through the FALSE branch, Create an CONTACT2\n  // stored the new Odoo ID in d.id (Odoo create response).\n  // The original Super Transformer data is in d (all fields were merged).\n  const resolved_partner_id =\n    d.partner_id                    // already existed\n    ?? d.id                         // freshly created (Odoo returns { id: N })\n    ?? null;\n\n  return {\n    json: {\n      ...d,\n      resolved_partner_id,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3440,
+        3552
+      ],
+      "id": "a3207d34-ff81-4a7d-bc6d-c5b47341913f",
+      "name": "Resolve Partner ID",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Pre-Payment Builder\n//\n//  Merges the journal lookup result back into the collection data.\n//  Get Journal outputs { id, name, ... } but loses the original item.\n//  We re-attach everything needed for Create an PAYMENT2.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map((item, idx) => {\n  const journal = item.json;   // output of Get Journal\n\n  // Re-fetch the corresponding Super Transformer data via index\n  // (items are 1-to-1 because Get Journal processes one item at a time)\n  const src = $('Resolve Partner ID').item?.json ?? {};\n\n  const journal_id = journal.id ?? null;\n\n  return {\n    json: {\n      ...src,\n      journal_odoo_id : journal_id,\n      journal_name    : journal.name ?? src.odoo_journal_name,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3888,
+        3552
+      ],
+      "id": "76d2783a-a4d3-4ea9-ae98-9fb52823bd4e",
+      "name": "Build Payment Data",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        1872,
+        3488
+      ],
+      "id": "c4bbe0e0-9921-4c76-b071-eac6559d7b71",
+      "name": "Schedule Trigger3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2320,
+        3488
+      ],
+      "id": "18375de2-a851-4213-b92d-972555b01f5f",
+      "name": "Split Out5",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "id",
+            "name"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        2256,
+        3232
+      ],
+      "id": "93c05279-75b5-4ee4-93b3-5e3060f3dfc8",
+      "name": "Get many items3",
+      "executeOnce": true,
+      "alwaysOutputData": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. جلب بيانات أودو من السهم اللي جاي من Get many items2\nconst partners = $( \"Get many items2\" ).all().map(i => i.json);\n\n// 2. جلب التحصيلات من السهم اللي جاي من Split Out\nconst collections = $( \"Split Out4\" ).all();\n\n// 3. التنفيذ بناءً على عدد التحصيلات فقط\nreturn collections.map(item => {\n    const data = item.json;\n    \n    // وظيفة التنظيف للمطابقة المرنة (Shedhel vs Sedhel)\n    const clean = (str) => str ? str.toLowerCase().replace(/\\s+/g, '').replace(/sh/g, 's').trim() : \"\";\n\n    let isShipping = (data.collection_type === \"شحن\");\n    let targetName = isShipping \n        ? `عملاء نقدي ${data.project_name || ''}`.trim() \n        : (data.owner_name || \"\").trim();\n\n    // البحث في الـ 198 عميل اللي جبناهم\n    let foundPartner = partners.find(p => clean(p.name) === clean(targetName));\n\n    // القرار: شحن ميكريتش أبداً - عام يكريت لو مش موجود\n    const shouldCreate = (data.collection_type !== \"شحن\" && !foundPartner);\n\n    return {\n        json: {\n            ...data,\n            odoo_partner_name: targetName,\n            partner_id: foundPartner ? foundPartner.id : null,\n            contact_found: !!foundPartner,\n            should_create_contact: shouldCreate,\n            \n            // معالجة البنك والميمو\n            odoo_payment_label: (data.payment_method || \"\").split('(')[0].trim(),\n            odoo_journal_name: data.payment_method?.match(/\\(([^)]+)\\)/)?.[1] || \"Cash\",\n            odoo_memo: `Type: ${data.collection_type} | ID: ${data.id}`,\n            odoo_amount: parseFloat(data.total_amount) || 0,\n            odoo_date: data.collection_time ? data.collection_time.split(' ')[0] : \"\"\n        }\n    };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        3248
+      ],
+      "id": "8bf5b9f5-0869-4ad9-8823-015a2049cb17",
+      "name": "Super Transformer1",
+      "executeOnce": true,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b5e58dd5-7146-4965-a2af-99071d856429",
+              "leftValue": "={{ $json.should_create_contact }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2944,
+        3360
+      ],
+      "id": "b9546340-7c61-43fa-a01e-e0d12ca9bccc",
+      "name": "If7",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "="
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        3008,
+        3664
+      ],
+      "id": "61b3e4f9-3196-4abd-a9fd-27d73d9574a9",
+      "name": "Create an CONTACT3",
+      "executeOnce": true,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3216,
+        3456
+      ],
+      "id": "dc7aa972-308b-401c-831d-861f96bc1f74",
+      "name": "Merge3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.journal",
+        "operation": "getAll",
+        "limit": 1,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        3664,
+        3552
+      ],
+      "id": "fe0f275b-10f4-431a-a079-79273ce0b2f4",
+      "name": "Get Journal1",
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.payment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "partner_id",
+              "fieldValue": "={{ $json.resolved_partner_id }}"
+            },
+            {
+              "fieldName": "journal_id",
+              "fieldValue": "={{ $json.journal_odoo_id }}"
+            },
+            {
+              "fieldName": "amount",
+              "fieldValue": "={{ $json.odoo_amount }}"
+            },
+            {
+              "fieldName": "date",
+              "fieldValue": "={{ $json.odoo_date }}"
+            },
+            {
+              "fieldName": "memo",
+              "fieldValue": "={{ $json.odoo_memo }}"
+            },
+            {
+              "fieldName": "payment_type",
+              "fieldValue": "inbound"
+            },
+            {
+              "fieldName": "partner_type",
+              "fieldValue": "customer"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        4112,
+        3552
+      ],
+      "id": "cbf42ed2-88f9-43ec-9d45-f4f4ee94b74a",
+      "name": "Create an PAYMENT3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🖼️  Image Downloader\n//    Downloads receipt image and converts to base64 for Odoo attachment.\n//    Handles both receipt_image and receipt_image_url field names.\n// ══════════════════════════════════════════════════════════════════════\nconst results = [];\n\nfor (const item of $input.all()) {\n  const raw      = item.json;\n  const imageUrl = (raw.receipt_image ?? raw.receipt_image_url ?? '').trim();\n\n  if (!imageUrl) {\n    results.push({ json: { ...raw, image_base64: null, image_fetched: false } });\n    continue;\n  }\n\n  try {\n    const resp = await this.helpers.httpRequest({\n      method  : 'GET',\n      url     : imageUrl,\n      encoding: 'arraybuffer',\n    });\n    const base64 = Buffer.from(resp).toString('base64');\n    results.push({ json: { ...raw, image_base64: base64, image_fetched: true } });\n  } catch (err) {\n    results.push({ json: {\n      ...raw,\n      image_base64 : null,\n      image_fetched: false,\n      image_error  : err.message,\n    }});\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4112,
+        3776
+      ],
+      "id": "990ed380-6f36-4a03-b212-f89c011467dc",
+      "name": "Code in JavaScript6",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4336,
+        3632
+      ],
+      "id": "c94f50ae-7326-469e-92e1-72115660d804",
+      "name": "Merge_Payment_Image3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 📎  Prepare Attachment Data\n//    Extracts only what's needed for ir.attachment creation.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n  return {\n    json: {\n      collection_id   : d.id              ?? d.collection_id,\n      payment_odoo_id : d.payment_id      ?? d.id,\n      image_base64    : d.image_base64    ?? null,\n      image_fetched   : d.image_fetched   ?? false,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        3632
+      ],
+      "id": "2f09cf62-ee25-4438-88ce-0e52f8d4501b",
+      "name": "Prepare Attachment Data3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a1275773-b991-4295-8055-61af08bf3161",
+              "leftValue": "={{ $json.image_base64 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4784,
+        3632
+      ],
+      "id": "16d6ef15-9c87-485f-a3f0-59cd42ab9d07",
+      "name": "If8",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "ir.attachment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ `receipt_${$json.collection_id}.jpg` }}"
+            },
+            {
+              "fieldName": "type",
+              "fieldValue": "binary"
+            },
+            {
+              "fieldName": "res_model",
+              "fieldValue": "account.payment"
+            },
+            {
+              "fieldName": "res_id",
+              "fieldValue": "={{ $json.payment_odoo_id }}"
+            },
+            {
+              "fieldName": "datas",
+              "fieldValue": "={{ $json.image_base64 }}"
+            },
+            {
+              "fieldName": "mimetype",
+              "fieldValue": "image/jpeg"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        5008,
+        3632
+      ],
+      "id": "6bbcfb3e-6111-4109-bdf6-909254368b81",
+      "name": "Create an attachment3",
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2576,
+        3360
+      ],
+      "id": "a67535b5-9b7a-4aa4-8343-f06ed7b25b2f",
+      "name": "Merge1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Enrich Payment ID\n//    Takes the Odoo payment ID from Create an PAYMENT3 and attaches it\n//    to the original collection data so the attachment node can link\n//    the receipt image to the correct Odoo record.\n// ══════════════════════════════════════════════════════════════════════\nconst payments = $input.all();\nconst sources  = $('Build Payment Data1').all();\n\nreturn payments.map((p, idx) => {\n  const src = sources[idx] ? sources[idx].json : {};\n  return {\n    json: {\n      ...src,\n      payment_odoo_id: p.json.id ?? null,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11568,
+        4864
+      ],
+      "id": "9215a003-ffbc-4c05-a9b8-0f4bafaca0db",
+      "name": "Enrich Payment ID"
+    },
+    {
+      "parameters": {
+        "url": "https://portal.primeegy.com/api/b2b/v1/collections",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        9408,
+        4800
+      ],
+      "id": "91f5a852-f637-4c3f-9363-7694ed8b763d",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "q8paCIqF7vDywgPh",
+          "name": "Header Auth account prim coll"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Post-Contact-Merge Resolver\n//\n//  After Merge3, some items arrive from the TRUE branch (contact_found=true,\n//  partner_id already populated) and some from Create an CONTACT3 (new ID).\n//  This node normalises both paths into a single `resolved_partner_id`.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n\n  const resolved_partner_id =\n    d.partner_id                    // already existed\n    ?? d.id                         // freshly created (Odoo returns { id: N })\n    ?? null;\n\n  return {\n    json: {\n      ...d,\n      resolved_partner_id,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10752,
+        4864
+      ],
+      "id": "4e6c3ab2-5d97-4a5d-a0b0-4d0bdb73196b",
+      "name": "Resolve Partner ID1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Pre-Payment Builder\n//\n//  Merges the journal lookup result back into the collection data.\n//  Get Journal outputs { id, name, ... }.\n//  We re-attach everything needed for Create an PAYMENT3.\n// ══════════════════════════════════════════════════════════════════════\nconst journals = $input.all();\nconst sources  = $('Resolve Partner ID1').all();\n\nreturn journals.map((j, idx) => {\n  const src = sources[idx] ? sources[idx].json : {};\n  return {\n    json: {\n      ...src,\n      journal_odoo_id : j.json.id ?? null,\n      journal_name    : j.json.name ?? src.odoo_journal_name,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11200,
+        4864
+      ],
+      "id": "8ba07141-c1ea-4277-90d0-bb56768eaf69",
+      "name": "Build Payment Data1"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        9184,
+        4800
+      ],
+      "id": "0e4d40a9-2e17-456f-883e-86c1f37ef14a",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        9632,
+        4800
+      ],
+      "id": "ed4cc568-3ed4-4ee1-a2dc-5d9dd53bb339",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "id",
+            "name"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        9568,
+        4544
+      ],
+      "id": "1a3be017-2081-4194-a455-315698f54ac8",
+      "name": "Get many items",
+      "executeOnce": true,
+      "alwaysOutputData": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🧠  Super Transformer — Collections → Odoo Normaliser  (v4.1 FINAL)\n//  INPUT  ← Split Out5       (portal collections, N items)\n//  INPUT  ← Get many items3  (Odoo res.partner, 198 items, executeOnce)\n//  OUTPUT → exactly N items, one per collection\n// ══════════════════════════════════════════════════════════════════════\n\n/* ── 0.  Loop-isolation: pull both datasets via $() ─────────────────── */\nconst partnerNode    = $('Get many items');\nconst collectionNode = $('Split Out');\n\nif (!partnerNode || !collectionNode) {\n  throw new Error(\n    'Super Transformer: missing upstream node reference. ' +\n    'Ensure \"Get many items3\" and \"Split Out5\" are connected.'\n  );\n}\n\nconst partners    = partnerNode.all().map(i => i.json);\nconst collections = collectionNode.all().map(i => i.json);\n\n/* ── 1.  Project-name map (API English → Odoo Arabic) ──────────────── */\nconst PROJECT_NAME_MAP = {\n  'Ein Bay'     : 'العين باي',\n  'Seychelles'  : 'سيشل',\n  'Sedhel'      : 'السديل',\n  'Shedhel'     : 'السديل',\n  'Pharma Beach': 'فارما بيتش',\n};\n\n/* ── 2.  Fuzzy-cleaning helper ─────────────────────────────────────── */\nfunction clean(str) {\n  if (!str) return '';\n  return String(str)\n    .toLowerCase()\n    .replace(/\\s+/g, '')                           // spaces\n    .replace(/sh/g, 's')                            // sh → s\n    .replace(/[\\u064B-\\u065F\\u0670\\u0640]/g, '')   // tashkeel\n    .replace(/[إأآا]/g, 'ا')                        // alef variants\n    .replace(/ى/g, 'ي')                             // alef maksura → ya\n    .replace(/ة/g, 'ه');                            // ta marbuta → ha\n}\n\n/* ── 3.  Resolve the Odoo contact name we expect to find ───────────── */\nfunction resolveTargetName(data) {\n  const type       = (data.collection_type || '').trim();\n  const rawProject = (data.project_name    || '').trim();\n  const owner      = (data.owner_name      || '').trim();\n  if (type === 'شحن') {\n    const mapped = PROJECT_NAME_MAP[rawProject] || rawProject;\n    return `عملاء نقدي ${mapped}`.trim();\n  }\n  return owner;\n}\n\n/* ── 4.  Extract bank / journal name from payment_method ───────────── */\nfunction extractJournalName(paymentMethod) {\n  if (!paymentMethod) return 'Cash';\n  const m = paymentMethod.match(/\\(([^)]+)\\)/);\n  return m ? m[1].trim() : paymentMethod.trim();\n}\n\n/* ── 5.  Main transform: 1 output item per collection ──────────────── */\nreturn collections.map((item, idx) => {\n  const targetName  = resolveTargetName(item);\n  const targetClean = clean(targetName);\n\n  // Fuzzy partner search\n  let foundPartner = partners.find(p => clean(p.name) === targetClean);\n\n  // Fallback: substring containment (cleaned)\n  if (!foundPartner) {\n    foundPartner = partners.find(p => {\n      const pc = clean(p.name);\n      return pc.includes(targetClean) || targetClean.includes(pc);\n    });\n  }\n\n  const isShipping   = (item.collection_type === 'شحن');\n  const shouldCreate = !isShipping && !foundPartner;\n\n  const memo = `Type: ${item.collection_type || 'N/A'} | ID: ${item.id ?? 'N/A'}`;\n  const odooDate = item.collection_time ? item.collection_time.split(' ')[0] : '';\n\n  return {\n    json: {\n      ...item,\n      _transform_index: idx,\n      odoo_partner_name: targetName,\n      partner_id: foundPartner ? foundPartner.id : null,\n      contact_found: !!foundPartner,\n      should_create_contact: shouldCreate,\n      odoo_payment_label: (item.payment_method || '').split('(')[0].trim(),\n      odoo_journal_name: extractJournalName(item.payment_method),\n      odoo_memo: memo,\n      odoo_amount: parseFloat(item.total_amount) || 0,\n      odoo_date: odooDate,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10096,
+        4560
+      ],
+      "id": "5f3b6c50-2a57-4e5f-a2f3-04d55803105d",
+      "name": "Super Transformer",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b5e58dd5-7146-4965-a2af-99071d856429",
+              "leftValue": "={{ $json.should_create_contact }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        10256,
+        4672
+      ],
+      "id": "38bf1bc6-0a82-4900-9290-3f0830d6aa74",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ $json.odoo_partner_name }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        10320,
+        4976
+      ],
+      "id": "3e1df518-a46f-4443-a7e6-4ea974c44bb2",
+      "name": "Create an CONTACT",
+      "executeOnce": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        10528,
+        4768
+      ],
+      "id": "ae6d4b96-fb65-4f99-ab12-e499e86a73ef",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.journal",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "name",
+            "id"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        10976,
+        4864
+      ],
+      "id": "dcf1e4c4-4880-4ff5-88c7-0692acd024eb",
+      "name": "Get Journal",
+      "executeOnce": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.payment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "partner_id",
+              "fieldValue": "={{ $json.resolved_partner_id }}"
+            },
+            {
+              "fieldName": "journal_id",
+              "fieldValue": "={{ $json.journal_odoo_id }}"
+            },
+            {
+              "fieldName": "amount",
+              "fieldValue": "={{ $json.odoo_amount }}"
+            },
+            {
+              "fieldName": "date",
+              "fieldValue": "={{ $json.odoo_date }}"
+            },
+            {
+              "fieldName": "memo",
+              "fieldValue": "={{ $json.odoo_memo }}"
+            },
+            {
+              "fieldName": "payment_type",
+              "fieldValue": "inbound"
+            },
+            {
+              "fieldName": "partner_type",
+              "fieldValue": "customer"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        11424,
+        4864
+      ],
+      "id": "fbe2100e-ad96-405d-8320-f06b697a880d",
+      "name": "Create an PAYMENT",
+      "executeOnce": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🖼️  Image Downloader\n//    Downloads receipt image and converts to base64 for Odoo attachment.\n//    Handles both receipt_image and receipt_image_url field names.\n// ══════════════════════════════════════════════════════════════════════\nconst results = [];\n\nfor (const item of $input.all()) {\n  const raw      = item.json;\n  const imageUrl = (raw.receipt_image ?? raw.receipt_image_url ?? '').trim();\n\n  if (!imageUrl) {\n    results.push({ json: { ...raw, image_base64: null, image_fetched: false } });\n    continue;\n  }\n\n  try {\n    const resp = await this.helpers.httpRequest({\n      method  : 'GET',\n      url     : imageUrl,\n      encoding: 'arraybuffer',\n    });\n    const base64 = Buffer.from(resp).toString('base64');\n    results.push({ json: { ...raw, image_base64: base64, image_fetched: true } });\n  } catch (err) {\n    results.push({ json: {\n      ...raw,\n      image_base64 : null,\n      image_fetched: false,\n      image_error  : err.message,\n    }});\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11424,
+        5088
+      ],
+      "id": "1c06e7d7-b192-46e1-8098-4faae461150c",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        11648,
+        4944
+      ],
+      "id": "c835b50f-0b3b-48ee-9e0d-c176edded47c",
+      "name": "Merge_Payment_Image"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 📎  Prepare Attachment Data\n//    Extracts only what's needed for ir.attachment creation.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n  return {\n    json: {\n      collection_id   : d.id              ?? d.collection_id,\n      payment_odoo_id : d.payment_odoo_id ?? null,\n      image_base64    : d.image_base64    ?? null,\n      image_fetched   : d.image_fetched   ?? false,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11872,
+        4944
+      ],
+      "id": "c1b99468-d36f-4ba9-86c8-6bdf31cdbb12",
+      "name": "Prepare Attachment Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a1275773-b991-4295-8055-61af08bf3161",
+              "leftValue": "={{ $json.image_base64 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        12096,
+        4944
+      ],
+      "id": "ddf75970-5b0d-4959-9faf-75ad4023d84b",
+      "name": "If9"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "ir.attachment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ `receipt_${$json.collection_id}.jpg` }}"
+            },
+            {
+              "fieldName": "type",
+              "fieldValue": "binary"
+            },
+            {
+              "fieldName": "res_model",
+              "fieldValue": "account.payment"
+            },
+            {
+              "fieldName": "res_id",
+              "fieldValue": "={{ $json.payment_odoo_id }}"
+            },
+            {
+              "fieldName": "datas",
+              "fieldValue": "={{ $json.image_base64 }}"
+            },
+            {
+              "fieldName": "mimetype",
+              "fieldValue": "image/jpeg"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        12320,
+        4944
+      ],
+      "id": "9ba77bdb-265e-4a3d-ad04-1f08ed85ed7f",
+      "name": "Create an attachment",
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        9888,
+        4672
+      ],
+      "id": "2da6332c-5c08-48a9-aa55-47406ef01f5f",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "url": "https://portal.primeegy.com/api/b2b/v1/collections",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5568,
+        6976
+      ],
+      "id": "55a092d5-dcc8-458d-8392-0c01bc2756cd",
+      "name": "HTTP Request3",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "q8paCIqF7vDywgPh",
+          "name": "Header Auth account prim coll"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const merged = $input.all();\nconst originals = $('Super Transformer2').all();\n\nreturn merged.map((item, idx) => {\n  const d = item.json;\n  const orig = originals[idx]?.json || {};\n  \n  // الـ ID الصح: إما موجود مسبقاً (partner_id) أو جديد (id من Create Contact)\n  const resolved_partner_id = d.partner_id ?? d.id ?? null;\n  \n  return {\n    json: {\n      ...orig,                    // ← استرجاع كل الداتا الأصلية من Super Transformer\n      resolved_partner_id,        // ← الـ ID النهائي للعميل\n      // تأكيد على الحقول المهمة عشان متضيعش\n      odoo_amount: orig.odoo_amount,\n      odoo_date: orig.odoo_date,\n      odoo_memo: orig.odoo_memo,\n      odoo_journal_id: orig.odoo_journal_id,\n      odoo_partner_name: orig.odoo_partner_name,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6912,
+        7040
+      ],
+      "id": "891f169b-4c07-470f-8dfe-60809da26cbf",
+      "name": "Resolve Partner ID2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Pre-Payment Builder\n//    Passes through all data and ensures journal_odoo_id is set from\n//    the Super Transformer mapping (no Odoo journal lookup needed).\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n  return {\n    json: {\n      ...d,\n      journal_odoo_id : d.odoo_journal_id ?? 7,\n      journal_name    : d.odoo_journal_name ?? 'Cash',\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7216,
+        7040
+      ],
+      "id": "3b839e8a-f570-4695-b699-38a7467179a5",
+      "name": "Build Payment Data2"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        5344,
+        6976
+      ],
+      "id": "f550b54b-e66e-4b7b-a03c-61e642660f87",
+      "name": "Schedule Trigger4"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        5792,
+        6976
+      ],
+      "id": "12f08714-0714-4487-b59e-a22799e51c2f",
+      "name": "Split Out6"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "id",
+            "name"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        5728,
+        6720
+      ],
+      "id": "10913ee8-cf51-4ddd-abf0-3b0499370fc2",
+      "name": "Get many items4",
+      "executeOnce": true,
+      "alwaysOutputData": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🧠  Super Transformer — Collections → Odoo Normaliser  (v4.3 - NEW IDs)\n//  INPUT  ← Split Out6\n//  INPUT  ← Get many items4\n//  OUTPUT → exactly N items, one per collection\n// ══════════════════════════════════════════════════════════════════════\n\n/* ── 0.  Loop-isolation: pull both datasets via $() ─────────────────── */\nconst partnerNode    = $('Get many items4');\nconst collectionNode = $('Split Out6');\n\nif (!partnerNode || !collectionNode) {\n  throw new Error(\n    'Super Transformer: missing upstream node reference. ' +\n    'Ensure nodes are correctly named in the workflow.'\n  );\n}\n\nconst partners    = partnerNode.all().map(i => i.json);\nconst collections = collectionNode.all().map(i => i.json);\n\n/* ── 1.  Project-name map (API English → Arabic) ─────────────────── */\nconst PROJECT_NAME_MAP = {\n  'Ein Bay'     : 'العين باي',\n  'Seychelles'  : 'سيشل',\n  'Sedhel'      : 'السديل',\n  'Shedhel'     : 'السديل',\n  'Pharma Beach': 'فارما بيتش',\n};\n\n/* ── 2.  Fuzzy-cleaning helper ─────────────────────────────────────── */\nfunction clean(str) {\n  if (!str) return '';\n  return String(str)\n    .toLowerCase()\n    .replace(/\\s+/g, '')                           // spaces\n    .replace(/sh/g, 's')                            // sh → s\n    .replace(/[\\u064B-\\u065F\\u0670\\u0640]/g, '')   // tashkeel\n    .replace(/[إأآا]/g, 'ا')                         // alef variants\n    .replace(/ى/g, 'ي')                             // alef maksura → ya\n    .replace(/ة/g, 'ه');                            // ta marbuta → ha\n}\n\n/* ── 3.  Resolve Target Name ───────────────────────────────────────── */\nfunction resolveTargetName(data) {\n  const type       = (data.collection_type || '').trim();\n  const rawProject = (data.project_name    || '').trim();\n  const owner      = (data.owner_name      || '').trim();\n  if (type === 'شحن') {\n    const mapped = PROJECT_NAME_MAP[rawProject] || rawProject;\n    return `عملاء نقدي ${mapped}`.trim();\n  }\n  return owner;\n}\n\n/* ── 4.  Journal ID Mapping (CIB=27, Alex=28, AAIB=30, Fawaterk=32) ── */\nconst JOURNAL_ID_MAP = {\n  'cib': 27,\n  'التجاري الدولي': 27,\n  'الإسكندرية': 28,\n  'الاسكندرية': 28,\n  'alex bank': 28,\n  'العربي الأفريقي': 30,\n  'العربي الافريقي': 30,\n  'aaib': 30,\n  // إضافة فواتيرك بالـ ID الجديد\n  'fawaterk': 32,\n  'فواتيرك': 32,\n};\n\nfunction resolveJournalId(paymentMethod) {\n  if (!paymentMethod) return 24; // الـ Fallback بقى 24 (الكاش) بدل 7\n  const pm = paymentMethod.toLowerCase();\n\n  // 1. البحث المباشر في الخريطة\n  for (const [key, id] of Object.entries(JOURNAL_ID_MAP)) {\n    if (pm.includes(key.toLowerCase())) return id;\n  }\n\n  // 2. البحث داخل الأقواس لو موجودة (مثلاً انستاباي (CIB))\n  const bracketMatch = pm.match(/\\(([^)]+)\\)/);\n  if (bracketMatch) {\n    const inside = bracketMatch[1].toLowerCase();\n    for (const [key, id] of Object.entries(JOURNAL_ID_MAP)) {\n      if (inside.includes(key.toLowerCase())) return id;\n    }\n  }\n\n  return 24; // أي حاجة تانية تروح للخزنة الرئيسية (ID 24)\n}\n\n/* ── 5.  Extract Journal Name ──────────────────────────────────────── */\nfunction extractJournalName(paymentMethod) {\n  if (!paymentMethod) return 'Cash';\n  const m = paymentMethod.match(/\\(([^)]+)\\)/);\n  return m ? m[1].trim() : paymentMethod.trim();\n}\n\n/* ── 6.  Main transform ────────────────────────────────────────────── */\nreturn collections.map((item, idx) => {\n  const targetName  = resolveTargetName(item);\n  const targetClean = clean(targetName);\n\n  let foundPartner = partners.find(p => clean(p.name) === targetClean);\n\n  if (!foundPartner) {\n    foundPartner = partners.find(p => {\n      const pc = clean(p.name);\n      return pc.includes(targetClean) || targetClean.includes(pc);\n    });\n  }\n\n  const isShipping   = (item.collection_type === 'شحن');\n  const shouldCreate = !isShipping && !foundPartner;\n\n  return {\n    json: {\n      ...item,\n      _transform_index: idx,\n      odoo_partner_name: targetName,\n      partner_id: foundPartner ? foundPartner.id : null,\n      contact_found: !!foundPartner,\n      should_create_contact: shouldCreate,\n      odoo_journal_name: extractJournalName(item.payment_method),\n      odoo_journal_id: resolveJournalId(item.payment_method),\n      odoo_memo: `Type: ${item.collection_type || 'N/A'} | ID: ${item.id ?? 'N/A'}`,\n      odoo_amount: parseFloat(item.total_amount) || 0,\n      odoo_date: item.collection_time ? item.collection_time.split(' ')[0] : '',\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6256,
+        6736
+      ],
+      "id": "04a98835-389c-4b28-9902-e967803c5cdf",
+      "name": "Super Transformer2",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b5e58dd5-7146-4965-a2af-99071d856429",
+              "leftValue": "={{ $json.should_create_contact }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        6384,
+        6864
+      ],
+      "id": "6adfee33-c6a6-4d91-a096-a90f28370886",
+      "name": "If10"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "res.partner",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ $json.odoo_partner_name }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        6640,
+        6720
+      ],
+      "id": "7a71862f-77ab-43a8-bbff-e846c924cf29",
+      "name": "Create an CONTACT4",
+      "executeOnce": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        6800,
+        6896
+      ],
+      "id": "42506d7e-54a2-4fed-92eb-6c12fabe1ab1",
+      "name": "Merge4"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.payment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "partner_id",
+              "fieldValue": "={{ $json.resolved_partner_id }}"
+            },
+            {
+              "fieldName": "journal_id",
+              "fieldValue": "={{ $json.odoo_journal_id }}"
+            },
+            {
+              "fieldName": "amount",
+              "fieldValue": "={{ $json.odoo_amount }}"
+            },
+            {
+              "fieldName": "date",
+              "fieldValue": "={{ $json.odoo_date }}"
+            },
+            {
+              "fieldName": "memo",
+              "fieldValue": "={{ $json.odoo_memo }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        7504,
+        7040
+      ],
+      "id": "84c714e2-e82b-43f2-8d53-11ded1daee37",
+      "name": "Create an PAYMENT4",
+      "executeOnce": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🔧  Enrich Payment ID\n//    Takes the Odoo payment ID from Create an PAYMENT3 and attaches it\n//    to the original collection data so the attachment node can link\n//    the receipt image to the correct Odoo record.\n// ══════════════════════════════════════════════════════════════════════\nconst payments = $input.all();\nconst sources  = $('Build Payment Data2').all();\n\nreturn payments.map((p, idx) => {\n  const src = sources[idx] ? sources[idx].json : {};\n  return {\n    json: {\n      ...src,\n      payment_odoo_id: p.json.id ?? null,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7728,
+        7040
+      ],
+      "id": "59affb07-b246-4862-be53-91b9a3fe56da",
+      "name": "Enrich Payment ID1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 🖼️  Image Downloader\n//    Downloads receipt image and converts to base64 for Odoo attachment.\n//    Handles both receipt_image and receipt_image_url field names.\n// ══════════════════════════════════════════════════════════════════════\nconst results = [];\n\nfor (const item of $input.all()) {\n  const raw      = item.json;\n  const imageUrl = (raw.receipt_image ?? raw.receipt_image_url ?? '').trim();\n\n  if (!imageUrl) {\n    results.push({ json: { ...raw, image_base64: null, image_fetched: false } });\n    continue;\n  }\n\n  try {\n    const resp = await this.helpers.httpRequest({\n      method  : 'GET',\n      url     : imageUrl,\n      encoding: 'arraybuffer',\n    });\n    const base64 = Buffer.from(resp).toString('base64');\n    results.push({ json: { ...raw, image_base64: base64, image_fetched: true } });\n  } catch (err) {\n    results.push({ json: {\n      ...raw,\n      image_base64 : null,\n      image_fetched: false,\n      image_error  : err.message,\n    }});\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7584,
+        7264
+      ],
+      "id": "e2584636-74e7-4119-b856-a748adae1a88",
+      "name": "Code in JavaScript7"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        8000,
+        6960
+      ],
+      "id": "c34f7cc8-3090-4cb2-9e89-24a545774a4a",
+      "name": "Merge_Payment_Image4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ══════════════════════════════════════════════════════════════════════\n// 📎  Prepare Attachment Data\n//    Extracts only what's needed for ir.attachment creation.\n// ══════════════════════════════════════════════════════════════════════\nreturn $input.all().map(item => {\n  const d = item.json;\n  return {\n    json: {\n      collection_id   : d.id              ?? d.collection_id,\n      payment_odoo_id : d.payment_odoo_id ?? null,\n      image_base64    : d.image_base64    ?? null,\n      image_fetched   : d.image_fetched   ?? false,\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8256,
+        6944
+      ],
+      "id": "eea3f777-9ee7-4bd0-8d85-eb57f26aeaef",
+      "name": "Prepare Attachment Data4"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a1275773-b991-4295-8055-61af08bf3161",
+              "leftValue": "={{ $json.image_base64 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        8544,
+        6928
+      ],
+      "id": "fe27b9ca-9dbc-48db-afea-2c9e0d6da631",
+      "name": "If11"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "ir.attachment",
+        "fieldsToCreateOrUpdate": {
+          "fields": [
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ `receipt_${$json.collection_id}.jpg` }}"
+            },
+            {
+              "fieldName": "type",
+              "fieldValue": "binary"
+            },
+            {
+              "fieldName": "res_model",
+              "fieldValue": "account.payment"
+            },
+            {
+              "fieldName": "res_id",
+              "fieldValue": "={{ $json.payment_odoo_id }}"
+            },
+            {
+              "fieldName": "datas",
+              "fieldValue": "={{ $json.image_base64 }}"
+            },
+            {
+              "fieldName": "mimetype",
+              "fieldValue": "image/jpeg"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        8880,
+        6912
+      ],
+      "id": "6f5808e9-f569-4b01-84fe-a3f60eed8257",
+      "name": "Create an attachment4",
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        6048,
+        6848
+      ],
+      "id": "ae0367eb-3911-4b9e-9130-2c8177503b49",
+      "name": "Merge5"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "account.payment.method.line",
+        "operation": "getAll",
+        "limit": 5,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        7504,
+        6544
+      ],
+      "id": "d6f0468c-c319-4916-b8dc-9d6183c6090b",
+      "name": "Get many items1",
+      "credentials": {
+        "odooApi": {
+          "id": "dwQXKPa9WytiLMXq",
+          "name": "prim"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "content": "## LAST WORKFLOW\n",
+        "height": 1104,
+        "width": 3840
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        5264,
+        6352
+      ],
+      "typeVersion": 1,
+      "id": "fb118735-8c65-4b91-b050-1c33c2df7485",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request2": {
+      "main": [
+        [
+          {
+            "node": "Split Out5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Partner ID": {
+      "main": [
+        [
+          {
+            "node": "Get Journal1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Payment Data": {
+      "main": [
+        [
+          {
+            "node": "Create an PAYMENT3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger3": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get many items3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out5": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Super Transformer1": {
+      "main": [
+        [
+          {
+            "node": "If7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If7": {
+      "main": [
+        [
+          {
+            "node": "Merge3",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Create an CONTACT3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an CONTACT3": {
+      "main": [
+        [
+          {
+            "node": "Merge3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge3": {
+      "main": [
+        [
+          {
+            "node": "Resolve Partner ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Journal1": {
+      "main": [
+        [
+          {
+            "node": "Build Payment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an PAYMENT3": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image3",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript6": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge_Payment_Image3": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attachment Data3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attachment Data3": {
+      "main": [
+        [
+          {
+            "node": "If8",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If8": {
+      "main": [
+        [
+          {
+            "node": "Create an attachment3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get many items3": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Super Transformer1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Payment ID": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Partner ID1": {
+      "main": [
+        [
+          {
+            "node": "Get Journal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Payment Data1": {
+      "main": [
+        [
+          {
+            "node": "Create an PAYMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get many items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get many items": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Super Transformer": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Create an CONTACT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an CONTACT": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Resolve Partner ID1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Journal": {
+      "main": [
+        [
+          {
+            "node": "Build Payment Data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an PAYMENT": {
+      "main": [
+        [
+          {
+            "node": "Enrich Payment ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge_Payment_Image": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attachment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attachment Data": {
+      "main": [
+        [
+          {
+            "node": "If9",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If9": {
+      "main": [
+        [
+          {
+            "node": "Create an attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Super Transformer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request3": {
+      "main": [
+        [
+          {
+            "node": "Split Out6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Partner ID2": {
+      "main": [
+        [
+          {
+            "node": "Build Payment Data2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Payment Data2": {
+      "main": [
+        [
+          {
+            "node": "Create an PAYMENT4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger4": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get many items4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out6": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript7",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge5",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get many items4": {
+      "main": [
+        [
+          {
+            "node": "Merge5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Super Transformer2": {
+      "main": [
+        [
+          {
+            "node": "If10",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If10": {
+      "main": [
+        [
+          {
+            "node": "Create an CONTACT4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge4",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Create an CONTACT4": {
+      "main": [
+        []
+      ]
+    },
+    "Merge4": {
+      "main": [
+        [
+          {
+            "node": "Resolve Partner ID2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create an PAYMENT4": {
+      "main": [
+        [
+          {
+            "node": "Enrich Payment ID1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Payment ID1": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image4",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript7": {
+      "main": [
+        [
+          {
+            "node": "Merge_Payment_Image4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge_Payment_Image4": {
+      "main": [
+        [
+          {
+            "node": "Prepare Attachment Data4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attachment Data4": {
+      "main": [
+        [
+          {
+            "node": "If11",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If11": {
+      "main": [
+        [
+          {
+            "node": "Create an attachment4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge5": {
+      "main": [
+        [
+          {
+            "node": "Super Transformer2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "timezone": "Africa/Cairo",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "81849a99-7d83-4215-979f-3e907cd081cd",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "409957614cabdc29cf8fad3b20bff06fc7336a75fa67fdf8a446351160f8b78a"
+  },
+  "id": "gptFEK4HvX5q7MHw",
+  "tags": [
+    {
+      "updatedAt": "2026-05-12T20:46:28.477Z",
+      "createdAt": "2026-05-12T20:46:28.477Z",
+      "id": "Jw5FvmRSFkiLByvl",
+      "name": "production"
+    },
+    {
+      "updatedAt": "2026-05-12T20:46:28.413Z",
+      "createdAt": "2026-05-12T20:46:28.413Z",
+      "id": "NacFzZM8twFnUe4C",
+      "name": "collections"
+    },
+    {
+      "updatedAt": "2026-05-13T11:18:18.970Z",
+      "createdAt": "2026-05-13T11:18:18.970Z",
+      "id": "TCAwJ75MWMsxFNDP",
+      "name": "v4-fixed"
+    },
+    {
+      "updatedAt": "2026-05-12T20:46:28.476Z",
+      "createdAt": "2026-05-12T20:46:28.476Z",
+      "id": "inhDpuwyj9VcMvyH",
+      "name": "odoo"
+    }
+  ]
+}
